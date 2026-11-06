@@ -2,7 +2,7 @@ import base64
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,10 @@ router = APIRouter(prefix="/bookings", tags=["bookings"])
 _ERROR_RESPONSES = {
     404: {"content": {"application/json": {"example": {"error": "slot not found"}}}},
     409: {"content": {"application/json": {"example": {"error": "slot not found"}}}},
+}
+
+_ERR_CONTENT = {
+    "content": {"application/json": {"example": {"error": "slot not found"}}}
 }
 
 _NOT_FOUND = JSONResponse(
@@ -154,27 +158,44 @@ async def cancel_booking(
     return BookingResponse.model_validate(booking)
 
 
-@router.post("", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=BookingResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        400: _ERR_CONTENT,
+        404: _ERR_CONTENT,
+        409: _ERR_CONTENT,
+    },
+)
 async def create_booking(
     body: BookingRequest,
     session: AsyncSession = Depends(get_session),
-) -> BookingResponse:
-    # Verify the slot exists and is still available.
+) -> BookingResponse | JSONResponse:
     result = await session.execute(select(Slot).where(Slot.id == body.slot_id))
     slot = result.scalar_one_or_none()
 
     if slot is None:
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Slot '{body.slot_id}' not found",
+            content={"error": "slot not found"},
         )
+
+    now = datetime.now(tz=slot.start.tzinfo)
+    if slot.start <= now:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "slot not found"},
+        )
+
     if not slot.available:
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Slot '{body.slot_id}' is no longer available",
+            content={"error": "slot not found"},
         )
 
     # Mark slot as taken and persist the booking atomically.
+    # name and email are already trimmed/lowercased by BookingRequest validators.
     slot.available = False
     booking = Booking(slot_id=body.slot_id, name=body.name, email=body.email)
     session.add(booking)

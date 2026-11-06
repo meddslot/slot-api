@@ -1,12 +1,33 @@
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 
 
 class BookingRequest(BaseModel):
     slot_id: str
     name: str
     email: EmailStr
+
+    @field_validator("slot_id", mode="before")
+    @classmethod
+    def slot_id_not_empty(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("slot_id must not be empty")
+        return v
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def name_strip(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("name must not be empty")
+        return v.strip()
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def email_strip_and_lower(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("email must not be empty")
+        return v.strip().lower()
 
 
 class BookingResponse(BaseModel):
