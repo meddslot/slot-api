@@ -10,29 +10,58 @@ from slot_api.schemas.booking import BookingRequest, BookingResponse
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
-
-_NOT_FOUND_RESPONSE = {
-    404: {"content": {"application/json": {"example": {"error": "slot not found"}}}}
+_ERROR_RESPONSES = {
+    404: {"content": {"application/json": {"example": {"error": "slot not found"}}}},
+    409: {"content": {"application/json": {"example": {"error": "slot not found"}}}},
 }
 
-
-@router.get(
-    "/{booking_id}",
-    response_model=BookingResponse,
-    responses=_NOT_FOUND_RESPONSE,
+_NOT_FOUND = JSONResponse(
+    status_code=status.HTTP_404_NOT_FOUND,
+    content={"error": "slot not found"},
 )
+_ALREADY_CANCELLED = JSONResponse(
+    status_code=status.HTTP_409_CONFLICT,
+    content={"error": "slot not found"},
+)
+
+
+@router.get("/{id}", response_model=BookingResponse, responses=_ERROR_RESPONSES)
 async def get_booking(
-    booking_id: str,
+    id: str,
     session: AsyncSession = Depends(get_session),
 ) -> BookingResponse | JSONResponse:
-    result = await session.execute(select(Booking).where(Booking.id == booking_id))
+    result = await session.execute(select(Booking).where(Booking.id == id))
     booking = result.scalar_one_or_none()
 
     if booking is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": "slot not found"},
-        )
+        return _NOT_FOUND
+
+    return BookingResponse.model_validate(booking)
+
+
+@router.delete("/{id}", response_model=BookingResponse, responses=_ERROR_RESPONSES)
+async def cancel_booking(
+    id: str,
+    session: AsyncSession = Depends(get_session),
+) -> BookingResponse | JSONResponse:
+    result = await session.execute(select(Booking).where(Booking.id == id))
+    booking = result.scalar_one_or_none()
+
+    if booking is None:
+        return _NOT_FOUND
+
+    if booking.status == "cancelled":
+        return _ALREADY_CANCELLED
+
+    # Free the slot back up and mark the booking cancelled.
+    slot_result = await session.execute(select(Slot).where(Slot.id == booking.slot_id))
+    slot = slot_result.scalar_one_or_none()
+    if slot is not None:
+        slot.available = True
+
+    booking.status = "cancelled"
+    await session.commit()
+    await session.refresh(booking)
 
     return BookingResponse.model_validate(booking)
 
