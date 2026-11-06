@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from slot_api.core.db import Base
+from slot_api.core.base import Base
 
 
 class Slot(Base):

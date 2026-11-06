@@ -6,9 +6,13 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
 
+from slot_api.core.base import Base
 from slot_api.core.config import settings
+from slot_api.core.registry import register as _register_models
+
+# Ensure all model tables are on Base.metadata before any DDL runs.
+_register_models()
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -32,11 +36,10 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-class Base(DeclarativeBase):
-    pass
-
-
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields a database session."""
     async with get_session_factory()() as session:
         yield session
+
+
+__all__ = ["Base", "get_engine", "get_session", "get_session_factory"]
