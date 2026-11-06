@@ -3,12 +3,16 @@ RUN apk update && apk add uv
 WORKDIR /app/
 COPY pyproject.toml uv.lock README.md ./
 COPY ./src ./src
+COPY ./migrations ./migrations
+COPY alembic.ini ./
 RUN uv sync --no-cache
 
 FROM python:3.13-alpine
 WORKDIR /app/
 COPY --from=builder /app/.venv /app/.venv
 COPY ./src ./src
+COPY ./migrations ./migrations
+COPY alembic.ini ./
 RUN adduser -D appuser && chown -R appuser:appuser /app
 USER appuser
 ENV PATH="/app/.venv/bin:$PATH"
