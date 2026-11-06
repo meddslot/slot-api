@@ -1,7 +1,8 @@
 import base64
 import hashlib
 import json
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from slot_api.core.db import get_session
 from slot_api.models.booking import Booking
 from slot_api.models.idempotency_key import IdempotencyKey
+from slot_api.models.rate_limit_attempt import RateLimitAttempt
 from slot_api.models.slot import Slot
 from slot_api.schemas.booking import (
     BookingListResponse,
@@ -204,6 +206,7 @@ async def cancel_booking(
         404: _ERR_CONTENT,
         409: _ERR_CONTENT,
         422: _ERR_CONTENT,
+        429: _ERR_CONTENT,
     },
 )
 async def create_booking(
@@ -230,6 +233,46 @@ async def create_booking(
                 status_code=422,
                 content=_ERR_BODY,
             )
+
+    # --- Rate limit: max 5 attempts per email per minute --------------------
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+    count_result = await session.execute(
+        select(func.count())
+        .select_from(RateLimitAttempt)
+        .where(
+            RateLimitAttempt.email == body.email,
+            RateLimitAttempt.created_at >= cutoff,
+        )
+    )
+    attempt_count = count_result.scalar() or 0
+
+    if attempt_count >= 5:
+        oldest_result = await session.execute(
+            select(func.min(RateLimitAttempt.created_at)).where(
+                RateLimitAttempt.email == body.email,
+                RateLimitAttempt.created_at >= cutoff,
+            )
+        )
+        oldest = oldest_result.scalar()
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        retry_after = max(
+            1,
+            math.ceil(
+                (
+                    oldest + timedelta(seconds=60) - datetime.now(timezone.utc)
+                ).total_seconds()
+            ),
+        )
+        return JSONResponse(
+            status_code=429,
+            content=_ERR_BODY,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # Record this attempt so it counts even if the booking fails.
+    session.add(RateLimitAttempt(email=body.email))
+    await session.commit()
 
     # --- Lock the slot row to serialise concurrent attempts -----------------
     result = await session.execute(

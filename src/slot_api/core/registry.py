@@ -5,6 +5,7 @@ Call register() before any DDL or migration code runs.
 
 from slot_api.models import booking as _booking_module
 from slot_api.models import idempotency_key as _idempotency_module
+from slot_api.models import rate_limit_attempt as _rate_limit_module
 from slot_api.models import slot as _slot_module
 
 
@@ -13,3 +14,4 @@ def register() -> None:
     _ = _slot_module
     _ = _booking_module
     _ = _idempotency_module
+    _ = _rate_limit_module
