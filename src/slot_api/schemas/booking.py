@@ -18,3 +18,8 @@ class BookingResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class BookingListResponse(BaseModel):
+    bookings: list[BookingResponse]
+    next_cursor: str | None

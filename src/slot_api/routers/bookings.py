@@ -1,12 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import base64
+from datetime import datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slot_api.core.db import get_session
 from slot_api.models.booking import Booking
 from slot_api.models.slot import Slot
-from slot_api.schemas.booking import BookingRequest, BookingResponse
+from slot_api.schemas.booking import (
+    BookingListResponse,
+    BookingRequest,
+    BookingResponse,
+)
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -23,6 +31,86 @@ _ALREADY_CANCELLED = JSONResponse(
     status_code=status.HTTP_409_CONFLICT,
     content={"error": "slot not found"},
 )
+_BAD_LIMIT = JSONResponse(
+    status_code=status.HTTP_400_BAD_REQUEST,
+    content={"error": "slot not found"},
+)
+
+# ---------------------------------------------------------------------------
+# Cursor helpers
+# ---------------------------------------------------------------------------
+# Cursor encodes (created_at ISO, id) so we can page by (created_at, id) and
+# handle ties when two bookings share the same timestamp.
+
+
+def _encode_cursor(created_at: datetime, booking_id: str) -> str:
+    payload = f"{created_at.isoformat()}|{booking_id}"
+    return base64.urlsafe_b64encode(payload.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    payload = base64.urlsafe_b64decode(cursor.encode()).decode()
+    ts, booking_id = payload.split("|", 1)
+    return datetime.fromisoformat(ts), booking_id
+
+
+# ---------------------------------------------------------------------------
+# Routes — list must be declared before /{id} so FastAPI resolves correctly
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "",
+    response_model=BookingListResponse,
+    responses={
+        400: {"content": {"application/json": {"example": {"error": "slot not found"}}}}
+    },
+)
+async def list_bookings(
+    email: Annotated[
+        str | None, Query(description="Filter by email (case-insensitive)")
+    ] = None,
+    cursor: Annotated[str | None, Query(description="Pagination cursor")] = None,
+    limit: Annotated[
+        int | None, Query(description="Page size (1-50, default 10)")
+    ] = None,
+    session: AsyncSession = Depends(get_session),
+) -> BookingListResponse | JSONResponse:
+    page_size = limit if limit is not None else 10
+    if not (1 <= page_size <= 50):
+        return _BAD_LIMIT
+
+    stmt = select(Booking)
+
+    if email is not None:
+        stmt = stmt.where(func.lower(Booking.email) == email.lower())
+
+    if cursor is not None:
+        cursor_dt, cursor_id = _decode_cursor(cursor)
+        # Return rows where (created_at, id) comes strictly after the cursor,
+        # ordered oldest-first.
+        stmt = stmt.where(
+            or_(
+                Booking.created_at > cursor_dt,
+                and_(Booking.created_at == cursor_dt, Booking.id > cursor_id),
+            )
+        )
+
+    stmt = stmt.order_by(Booking.created_at.asc(), Booking.id.asc())
+    stmt = stmt.limit(page_size + 1)  # fetch one extra to detect next page
+
+    result = await session.execute(stmt)
+    rows = list(result.scalars().all())
+
+    has_next = len(rows) > page_size
+    page = rows[:page_size]
+
+    next_cursor = _encode_cursor(page[-1].created_at, page[-1].id) if has_next else None
+
+    return BookingListResponse(
+        bookings=[BookingResponse.model_validate(b) for b in page],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/{id}", response_model=BookingResponse, responses=_ERROR_RESPONSES)
