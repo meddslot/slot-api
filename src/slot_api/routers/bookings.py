@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,32 @@ from slot_api.models.slot import Slot
 from slot_api.schemas.booking import BookingRequest, BookingResponse
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
+
+
+_NOT_FOUND_RESPONSE = {
+    404: {"content": {"application/json": {"example": {"error": "slot not found"}}}}
+}
+
+
+@router.get(
+    "/{booking_id}",
+    response_model=BookingResponse,
+    responses=_NOT_FOUND_RESPONSE,
+)
+async def get_booking(
+    booking_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> BookingResponse | JSONResponse:
+    result = await session.execute(select(Booking).where(Booking.id == booking_id))
+    booking = result.scalar_one_or_none()
+
+    if booking is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": "slot not found"},
+        )
+
+    return BookingResponse.model_validate(booking)
 
 
 @router.post("", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
