@@ -1,9 +1,9 @@
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Load .env before the Settings singleton is constructed so the file
-# always wins over any system-level environment variable.
-load_dotenv(override=True)
+# Load .env to populate any settings not already set in the environment.
+# No override=True so an explicit env var (e.g. from the shell or CI) wins.
+load_dotenv()
 
 
 class Settings(BaseSettings):
