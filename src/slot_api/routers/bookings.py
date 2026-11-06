@@ -1,14 +1,18 @@
 import base64
-from datetime import datetime
+import hashlib
+import json
+from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slot_api.core.db import get_session
 from slot_api.models.booking import Booking
+from slot_api.models.idempotency_key import IdempotencyKey
 from slot_api.models.slot import Slot
 from slot_api.schemas.booking import (
     BookingListResponse,
@@ -39,6 +43,42 @@ _BAD_LIMIT = JSONResponse(
     status_code=status.HTTP_400_BAD_REQUEST,
     content={"error": "slot not found"},
 )
+
+_ERR_BODY = {"error": "slot not found"}
+
+
+# ---------------------------------------------------------------------------
+# Idempotency helpers
+# ---------------------------------------------------------------------------
+
+
+def _request_hash(body: BookingRequest) -> str:
+    """SHA-256 of the normalised JSON body (after trim/lowercase validators)."""
+    return hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+
+
+async def _store_idempotency(
+    session: AsyncSession,
+    key: str | None,
+    req_hash: str,
+    status_code: int,
+    body: dict,
+    booking_id: str | None,
+) -> None:
+    """Persist an idempotency record and commit.  No-op when key is absent."""
+    if key is None:
+        return
+    session.add(
+        IdempotencyKey(
+            key=key,
+            request_hash=req_hash,
+            status_code=status_code,
+            response_body=json.dumps(body),
+            booking_id=booking_id,
+        )
+    )
+    await session.commit()
+
 
 # ---------------------------------------------------------------------------
 # Cursor helpers
@@ -91,8 +131,6 @@ async def list_bookings(
 
     if cursor is not None:
         cursor_dt, cursor_id = _decode_cursor(cursor)
-        # Return rows where (created_at, id) comes strictly after the cursor,
-        # ordered oldest-first.
         stmt = stmt.where(
             or_(
                 Booking.created_at > cursor_dt,
@@ -101,7 +139,7 @@ async def list_bookings(
         )
 
     stmt = stmt.order_by(Booking.created_at.asc(), Booking.id.asc())
-    stmt = stmt.limit(page_size + 1)  # fetch one extra to detect next page
+    stmt = stmt.limit(page_size + 1)
 
     result = await session.execute(stmt)
     rows = list(result.scalars().all())
@@ -145,7 +183,6 @@ async def cancel_booking(
     if booking.status == "cancelled":
         return _ALREADY_CANCELLED
 
-    # Free the slot back up and mark the booking cancelled.
     slot_result = await session.execute(select(Slot).where(Slot.id == booking.slot_id))
     slot = slot_result.scalar_one_or_none()
     if slot is not None:
@@ -166,41 +203,92 @@ async def cancel_booking(
         400: _ERR_CONTENT,
         404: _ERR_CONTENT,
         409: _ERR_CONTENT,
+        422: _ERR_CONTENT,
     },
 )
 async def create_booking(
     body: BookingRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> BookingResponse | JSONResponse:
-    result = await session.execute(select(Slot).where(Slot.id == body.slot_id))
+    idem_key = request.headers.get("idempotency-key")
+    req_hash = _request_hash(body)
+
+    # --- Idempotency replay -------------------------------------------------
+    if idem_key is not None:
+        result = await session.execute(
+            select(IdempotencyKey).where(IdempotencyKey.key == idem_key)
+        )
+        record = result.scalar_one_or_none()
+        if record is not None:
+            if record.request_hash == req_hash:
+                return JSONResponse(
+                    status_code=record.status_code,
+                    content=json.loads(record.response_body),
+                )
+            return JSONResponse(
+                status_code=422,
+                content=_ERR_BODY,
+            )
+
+    # --- Lock the slot row to serialise concurrent attempts -----------------
+    result = await session.execute(
+        select(Slot).where(Slot.id == body.slot_id).with_for_update()
+    )
     slot = result.scalar_one_or_none()
 
     if slot is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": "slot not found"},
-        )
+        await _store_idempotency(session, idem_key, req_hash, 404, _ERR_BODY, None)
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_ERR_BODY)
 
-    now = datetime.now(tz=slot.start.tzinfo)
-    if slot.start <= now:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "slot not found"},
-        )
+    now = datetime.now(timezone.utc)
+    start = slot.start
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if start <= now:
+        await _store_idempotency(session, idem_key, req_hash, 400, _ERR_BODY, None)
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=_ERR_BODY)
 
     if not slot.available:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"error": "slot not found"},
-        )
+        await _store_idempotency(session, idem_key, req_hash, 409, _ERR_BODY, None)
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=_ERR_BODY)
 
-    # Mark slot as taken and persist the booking atomically.
-    # name and email are already trimmed/lowercased by BookingRequest validators.
+    # --- Create the booking -------------------------------------------------
     slot.available = False
     booking = Booking(slot_id=body.slot_id, name=body.name, email=body.email)
     session.add(booking)
-    await session.flush()  # populate server-side defaults (id, created_at)
-    await session.refresh(booking)
-    await session.commit()
+
+    try:
+        await session.flush()
+        await session.refresh(booking)
+    except (IntegrityError, OperationalError):
+        # The partial unique index (IntegrityError) or a stale-snapshot
+        # conflict (OperationalError) caught a race that slipped past
+        # FOR UPDATE.
+        await session.rollback()
+        await _store_idempotency(session, idem_key, req_hash, 409, _ERR_BODY, None)
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=_ERR_BODY)
+
+    booking_data = BookingResponse.model_validate(booking).model_dump(mode="json")
+
+    # Add the idempotency record to the same transaction so both commit
+    # atomically (or both roll back).
+    if idem_key is not None:
+        session.add(
+            IdempotencyKey(
+                key=idem_key,
+                request_hash=req_hash,
+                status_code=201,
+                response_body=json.dumps(booking_data),
+                booking_id=booking.id,
+            )
+        )
+
+    try:
+        await session.commit()
+    except (IntegrityError, OperationalError):
+        await session.rollback()
+        await _store_idempotency(session, idem_key, req_hash, 409, _ERR_BODY, None)
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=_ERR_BODY)
 
     return BookingResponse.model_validate(booking)
