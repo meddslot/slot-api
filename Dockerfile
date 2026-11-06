@@ -18,4 +18,4 @@ USER appuser
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH=/app
 EXPOSE 8000
-CMD ["gunicorn", "slot_api.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker"]
+CMD ["gunicorn", "slot_api.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000"]
