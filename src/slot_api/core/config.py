@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     postgres_password: str
     postgres_db: str
     database_url: str
+    api_key: str
 
 
 settings = Settings()

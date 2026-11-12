@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 import slot_api.core.db as db_module
+from slot_api.core.config import settings
 from slot_api.core.db import Base
 from slot_api.main import app
 from slot_api.models.slot import Slot
@@ -57,7 +58,9 @@ async def test_concurrent_bookings_only_one_succeeds(tmp_path):
     app.dependency_overrides.clear()
 
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": settings.api_key},
     ) as client:
         tasks = [client.post("/bookings", json=VALID_BODY) for _ in range(10)]
         responses = await asyncio.gather(*tasks)

@@ -3,6 +3,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import slot_api.core.db as db_module
+from slot_api.core.config import settings
 from slot_api.core.db import Base, get_session
 from slot_api.main import app
 
@@ -41,7 +42,9 @@ async def client(db_engine):
     app.dependency_overrides[get_session] = override_get_session
 
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": settings.api_key},
     ) as ac:
         ac.session = session  # expose for seeding in tests
         yield ac
