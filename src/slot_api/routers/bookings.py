@@ -113,9 +113,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     },
 )
 async def list_bookings(
-    email: Annotated[
-        str | None, Query(description="Filter by email (case-insensitive)")
-    ] = None,
+    email: Annotated[str, Query(description="Filter by email (case-insensitive)")],
     cursor: Annotated[str | None, Query(description="Pagination cursor")] = None,
     limit: Annotated[
         int | None, Query(description="Page size (1-50, default 10)")
@@ -126,10 +124,7 @@ async def list_bookings(
     if not (1 <= page_size <= 50):
         return _BAD_LIMIT
 
-    stmt = select(Booking)
-
-    if email is not None:
-        stmt = stmt.where(func.lower(Booking.email) == email.lower())
+    stmt = select(Booking).where(func.lower(Booking.email) == email.lower())
 
     if cursor is not None:
         cursor_dt, cursor_id = _decode_cursor(cursor)

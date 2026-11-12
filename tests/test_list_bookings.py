@@ -40,7 +40,7 @@ async def seed(client, *rows):
 async def test_list_bookings_returns_200(client):
     await seed(client, make_slot("s1"), make_booking("s1"))
 
-    response = await client.get("/bookings")
+    response = await client.get("/bookings", params={"email": "ada@example.com"})
 
     assert response.status_code == 200
 
@@ -48,19 +48,21 @@ async def test_list_bookings_returns_200(client):
 async def test_list_bookings_response_shape(client):
     await seed(client, make_slot("s1"), make_booking("s1"))
 
-    data = (await client.get("/bookings")).json()
+    data = (await client.get("/bookings", params={"email": "ada@example.com"})).json()
 
     assert "bookings" in data
     assert "next_cursor" in data
 
 
 async def test_list_bookings_empty(client):
-    data = (await client.get("/bookings")).json()
+    data = (
+        await client.get("/bookings", params={"email": "nobody@example.com"})
+    ).json()
 
     assert data == {"bookings": [], "next_cursor": None}
 
 
-async def test_list_bookings_returns_all_by_default(client):
+async def test_list_bookings_returns_all_matching_email(client):
     await seed(
         client,
         make_slot("s1"),
@@ -69,7 +71,7 @@ async def test_list_bookings_returns_all_by_default(client):
         make_booking("s2", offset_seconds=1),
     )
 
-    data = (await client.get("/bookings")).json()
+    data = (await client.get("/bookings", params={"email": "ada@example.com"})).json()
 
     assert len(data["bookings"]) == 2
 
@@ -83,7 +85,7 @@ async def test_list_bookings_ordered_oldest_first(client):
         make_booking("s2", offset_seconds=0),
     )
 
-    data = (await client.get("/bookings")).json()
+    data = (await client.get("/bookings", params={"email": "ada@example.com"})).json()
     times = [b["created_at"] for b in data["bookings"]]
 
     assert times == sorted(times)
@@ -135,7 +137,9 @@ async def test_list_bookings_email_no_match(client):
 async def test_list_bookings_next_cursor_null_when_no_more_pages(client):
     await seed(client, make_slot("s1"), make_booking("s1"))
 
-    data = (await client.get("/bookings", params={"limit": 10})).json()
+    data = (
+        await client.get("/bookings", params={"email": "ada@example.com", "limit": 10})
+    ).json()
 
     assert data["next_cursor"] is None
 
@@ -145,7 +149,9 @@ async def test_list_bookings_next_cursor_present_when_more_pages(client):
     bookings = [make_booking(f"s{i}", offset_seconds=i) for i in range(5)]
     await seed(client, *slots, *bookings)
 
-    data = (await client.get("/bookings", params={"limit": 3})).json()
+    data = (
+        await client.get("/bookings", params={"email": "ada@example.com", "limit": 3})
+    ).json()
 
     assert data["next_cursor"] is not None
     assert len(data["bookings"]) == 3
@@ -156,10 +162,17 @@ async def test_list_bookings_cursor_returns_next_page(client):
     bookings = [make_booking(f"s{i}", offset_seconds=i) for i in range(5)]
     await seed(client, *slots, *bookings)
 
-    first = (await client.get("/bookings", params={"limit": 3})).json()
+    first = (
+        await client.get("/bookings", params={"email": "ada@example.com", "limit": 3})
+    ).json()
     second = (
         await client.get(
-            "/bookings", params={"limit": 3, "cursor": first["next_cursor"]}
+            "/bookings",
+            params={
+                "email": "ada@example.com",
+                "limit": 3,
+                "cursor": first["next_cursor"],
+            },
         )
     ).json()
 
@@ -172,10 +185,17 @@ async def test_list_bookings_cursor_no_overlap(client):
     bookings = [make_booking(f"s{i}", offset_seconds=i) for i in range(6)]
     await seed(client, *slots, *bookings)
 
-    first = (await client.get("/bookings", params={"limit": 3})).json()
+    first = (
+        await client.get("/bookings", params={"email": "ada@example.com", "limit": 3})
+    ).json()
     second = (
         await client.get(
-            "/bookings", params={"limit": 3, "cursor": first["next_cursor"]}
+            "/bookings",
+            params={
+                "email": "ada@example.com",
+                "limit": 3,
+                "cursor": first["next_cursor"],
+            },
         )
     ).json()
 
@@ -190,26 +210,55 @@ async def test_list_bookings_cursor_no_overlap(client):
 
 
 async def test_list_bookings_limit_zero_returns_400(client):
-    response = await client.get("/bookings", params={"limit": 0})
+    response = await client.get(
+        "/bookings", params={"email": "ada@example.com", "limit": 0}
+    )
 
     assert response.status_code == 400
     assert response.json() == {"error": "slot not found"}
 
 
 async def test_list_bookings_limit_51_returns_400(client):
-    response = await client.get("/bookings", params={"limit": 51})
+    response = await client.get(
+        "/bookings", params={"email": "ada@example.com", "limit": 51}
+    )
 
     assert response.status_code == 400
     assert response.json() == {"error": "slot not found"}
 
 
 async def test_list_bookings_limit_50_is_valid(client):
-    response = await client.get("/bookings", params={"limit": 50})
+    response = await client.get(
+        "/bookings", params={"email": "ada@example.com", "limit": 50}
+    )
 
     assert response.status_code == 200
 
 
 async def test_list_bookings_limit_1_is_valid(client):
-    response = await client.get("/bookings", params={"limit": 1})
+    response = await client.get(
+        "/bookings", params={"email": "ada@example.com", "limit": 1}
+    )
 
     assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Email is required
+# ---------------------------------------------------------------------------
+
+
+async def test_list_bookings_missing_email_returns_400(client):
+    response = await client.get("/bookings")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "slot not found"}
+
+
+async def test_list_bookings_blank_email_still_filters(client):
+    # An empty-string email is provided but matches nothing case-insensitively.
+    await seed(client, make_slot("s1"), make_booking("s1"))
+
+    data = (await client.get("/bookings", params={"email": ""})).json()
+
+    assert data["bookings"] == []
