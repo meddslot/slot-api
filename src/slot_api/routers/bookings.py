@@ -24,6 +24,10 @@ from slot_api.schemas.booking import (
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
+# Rate limit: at most 5 attempts per email per rolling 60-second window.
+_RATE_LIMIT_MAX_ATTEMPTS = 5
+_RATE_LIMIT_WINDOW = timedelta(seconds=60)
+
 _ERROR_RESPONSES = {
     404: {"content": {"application/json": {"example": {"error": "slot not found"}}}},
     409: {"content": {"application/json": {"example": {"error": "slot not found"}}}},
@@ -230,7 +234,29 @@ async def create_booking(
             )
 
     # --- Rate limit: max 5 attempts per email per minute --------------------
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+    #
+    # Admission is insert-then-count, decided entirely from committed state:
+    # the attempt row is written and committed FIRST, then counted in a
+    # fresh read that includes the request's own attempt.  Two concurrent
+    # requests can therefore never both be admitted beyond the limit — each
+    # admission requires the committed attempt count to be within the
+    # limit, and the commits are serialised by the database.  (The old
+    # count-then-insert order let simultaneous requests all read the same
+    # low count and slip past.)
+    #
+    # Which requests count as an attempt:
+    #   * Every POST /bookings whose body validates — i.e. carries a
+    #     parseable email — regardless of outcome: 201, 400 (slot started),
+    #     404 (missing slot), 409 (slot taken), and 429 responses are all
+    #     recorded, so failed attempts and rejected requests count too.
+    #   * Not counted: requests rejected before body validation (malformed
+    #     JSON, missing or invalid fields) — there is no email to attribute
+    #     the attempt to — and idempotent replays, which return the stored
+    #     response without reaching the limiter.
+    session.add(RateLimitAttempt(email=body.email))
+    await session.commit()
+
+    cutoff = datetime.now(timezone.utc) - _RATE_LIMIT_WINDOW
     count_result = await session.execute(
         select(func.count())
         .select_from(RateLimitAttempt)
@@ -241,7 +267,7 @@ async def create_booking(
     )
     attempt_count = count_result.scalar() or 0
 
-    if attempt_count >= 5:
+    if attempt_count > _RATE_LIMIT_MAX_ATTEMPTS:
         oldest_result = await session.execute(
             select(func.min(RateLimitAttempt.created_at)).where(
                 RateLimitAttempt.email == body.email,
@@ -255,7 +281,7 @@ async def create_booking(
             1,
             math.ceil(
                 (
-                    oldest + timedelta(seconds=60) - datetime.now(timezone.utc)
+                    oldest + _RATE_LIMIT_WINDOW - datetime.now(timezone.utc)
                 ).total_seconds()
             ),
         )
@@ -264,10 +290,6 @@ async def create_booking(
             content=_ERR_BODY,
             headers={"Retry-After": str(retry_after)},
         )
-
-    # Record this attempt so it counts even if the booking fails.
-    session.add(RateLimitAttempt(email=body.email))
-    await session.commit()
 
     # --- Lock the slot row to serialise concurrent attempts -----------------
     result = await session.execute(
