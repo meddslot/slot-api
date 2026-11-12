@@ -7,7 +7,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from slot_api.core.auth import verify_api_key
 from slot_api.core.db import get_engine
-from slot_api.routers import bookings, slots
+from slot_api.routers import bookings, reset, slots
 
 
 @asynccontextmanager
@@ -41,6 +41,7 @@ async def validation_error_handler(
 
 app.include_router(slots.router)
 app.include_router(bookings.router)
+app.include_router(reset.router)
 
 
 @app.get("/health")
